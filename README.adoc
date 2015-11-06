@@ -1,0 +1,145 @@
+This application demonstrates a https://drive.google.com/file/d/0B0KLoHg_gR_XQnV4RVhlNl96MHM/view[Reflected File Download (RFD) Attack] against a Spring application.
+
+= Running the Exploit
+
+== Starting the RFD exploitable Application
+To see the exploit in action run the application using the default Maven profile.
+For example, from the command line you can execute one of the following commands:
+
+[NOTE]
+====
+You will need JDK7+ installed on your machine for this to work.
+====
+
+.Running the application on Linux/Mac
+[source,bash]
+----
+$ ./mvnw spring-boot:run
+----
+
+.Running the application on Windows
+[source,bat]
+----
+$ .\mvnw.cmd spring-boot:run
+----
+
+The application will now be running on port 8080.
+
+== Trying the Exploit
+
+You can now request the URL from IE:
+
+http://localhost:8080/%22%7C%7Ccalc%7C%7C.bat
+
+This will result in the output of:
+
+[source,http]
+----
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=UTF-8
+Date: Fri, 06 Nov 2015 22:05:35 GMT
+Server: Apache-Coyote/1.1
+Transfer-Encoding: chunked
+
+{"message":"\"||calc||"}
+----
+
+and will open the calculator application on windows.
+
+= Running the Patched Application
+
+== Starting the Patched Application
+To see the patched in action run the application using the patched Maven profile.
+For example, from the command line you can execute one of the following commands:
+
+[NOTE]
+====
+You will need JDK7+ installed on your machine for this to work.
+====
+
+.Running the application on Linux/Mac
+[source,bash]
+----
+$ ./mvnw spring-boot:run -Ppatched
+----
+
+.Running the application on Windows
+[source,bat]
+----
+$ .\mvnw.cmd spring-boot:run -Ppatched
+----
+
+The application will now be running on port 8080.
+
+== Trying the Exploit
+
+You can now request the URL from IE:
+
+http://localhost:8080/%22%7C%7Ccalc%7C%7C.bat
+
+This will result in the output of:
+
+[source,http]
+----
+HTTP/1.1 200 OK
+Content-Disposition: attachment;filename=f.txt
+Content-Type: application/json;charset=UTF-8
+Date: Fri, 06 Nov 2015 22:17:45 GMT
+Server: Apache-Coyote/1.1
+Transfer-Encoding: chunked
+
+{"message":"\"||calc||"}
+----
+
+Since the Content-Disposition header is added along with a filename of f.txt the calculator application will not work.
+
+== Developer Frustrations
+
+Practically speaking, we have found always adding the Content-Disposition header is quite disruptive.
+This is because developers (and DevOps) often make these API requests in the browser when they are developing/troubleshooting.
+
+If a download is forced it adds quite a bit of extra work (i.e. the file must be opened, viewed, and then deleted).
+It is also quite surprising that typing https://example.com/configuration.yml into the browser results in downloading a file named f.txt.
+Forcing the download with a constant filename can also add a potential additional step of renaming the files if multiple files need to be viewed at once (i.e. in order to remember which file is which).
+
+You can find some of the feedback we have received in the https://jira.spring.io/issues/?jql=labels%20%3D%20RFD[Spring JIRA]
+
+To alleviate this, Spring does not add the Content-Disposition header if a malicious file extension is not found as a path parameter or a file extension.
+For example, requesting the following URL
+
+http://localhost:8080/%22%7C%7Ccalc%7C%7C
+
+will result in the output of:
+
+[source,http]
+----
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=UTF-8
+Date: Fri, 06 Nov 2015 22:17:45 GMT
+Server: Apache-Coyote/1.1
+Transfer-Encoding: chunked
+
+{"message":"\"||calc||"}
+----
+
+Since there is no executable file extension in the URL, the file is not considered executable and the calculator application will not work.
+
+== How the Fix Works
+
+. https://github.com/spring-projects/spring-framework/blob/v4.2.2.RELEASE/spring-webmvc/src/main/java/org/springframework/web/servlet/mvc/method/annotation/AbstractMessageConverterMethodProcessor.java#L324[AbstractMessageConverterMethodProcessor] will find all extensions in the last path segment of the requested URL.
+This includes path variables and the suffix of the last path segment.
+
+. If any of the extensions found in step 1 are not in our whitelist, then the Content-Disposition header is added.
+Our updated whitelist is planned to include:
+
+"txt", "text", "yml", "properties", "csv", "json", "xml", "atom", "rss", "png", "jpe", "jpeg", "jpg", "gif", "wbmp", "bmp"
+
+We have also observed that there were lots of file extensions mapped to $$image/*$$, $$audio/*$$, $$video/*$$, and $$+xml$$ that are likely to cause similar pain points.
+Rather than explicitly listing all of these extensions he thought it might be easier to leverage the mime types that they map to.
+For example, Spring would first find all file extensions in the URL (i.e. step 1).
+Spring would then compare each file extension against a whitelist of their respected media types.
+For example, if the path contained .svf, that maps to a mime type of image/vnd.svf Since the mime type is image we would allow it.
+
+One other mime type that we considered adding was $$text/*$$.
+The reason is that we wanted to allow all types of text to be rendered too (i.e. .html).
+A concern here is that if a company mapped a .bat, .pl, etc file to text/plain that this would mean the RFD attack would then be allowed.
